@@ -7,7 +7,7 @@ from urllib.request import urlopen, Request
 import requests
 
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-SLACK_USER_ID = os.environ["SLACK_USER_ID"]
+SLACK_USER_IDS = os.environ["SLACK_USER_IDS"].split(",")
 HF_API_URL = "https://huggingface.co/api/daily_papers"
 MAX_PAPERS = 3
 
@@ -135,13 +135,13 @@ def build_paper_blocks(paper, index):
     return blocks
 
 
-def send_slack_dm(blocks, fallback_text):
-    """Send a DM to the configured Slack user."""
+def send_slack_dm(user_id, blocks, fallback_text):
+    """Send a DM to a Slack user."""
     resp = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
         json={
-            "channel": SLACK_USER_ID,
+            "channel": user_id,
             "text": fallback_text,
             "blocks": blocks,
             "unfurl_links": False,
@@ -151,7 +151,7 @@ def send_slack_dm(blocks, fallback_text):
 
     data = resp.json()
     if not data.get("ok"):
-        print(f"ERROR: Slack API error: {data.get('error')}")
+        print(f"ERROR: Slack API error for {user_id}: {data.get('error')}")
         sys.exit(1)
 
 
@@ -163,12 +163,14 @@ def main():
         print("No papers today. Skipping.")
         return
 
-    print(f"Found {len(papers)} papers. Sending to Slack...")
+    print(f"Found {len(papers)} papers. Sending to {len(SLACK_USER_IDS)} users...")
 
-    for i, paper in enumerate(papers, 1):
-        blocks = build_paper_blocks(paper, i)
-        send_slack_dm(blocks, paper["title"])
-        print(f"Sent paper {i}/{len(papers)}: {paper['title']}")
+    for user_id in SLACK_USER_IDS:
+        user_id = user_id.strip()
+        for i, paper in enumerate(papers, 1):
+            blocks = build_paper_blocks(paper, i)
+            send_slack_dm(user_id, blocks, paper["title"])
+        print(f"Sent {len(papers)} papers to {user_id}")
 
 
 if __name__ == "__main__":
