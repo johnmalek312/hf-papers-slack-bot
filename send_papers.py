@@ -28,33 +28,65 @@ def fetch_papers():
     for item in items[:MAX_PAPERS]:
         title = item.findtext("title", "Untitled")
         link = item.findtext("link", "#")
+        description = item.findtext("description", "")
         if len(title) > 120:
             title = title[:117] + "..."
-        papers.append({"title": title, "link": link})
+        if len(description) > 200:
+            description = description[:197] + "..."
+        papers.append({"title": title, "link": link, "description": description})
 
     return papers
 
 
-def format_message(papers):
-    """Format papers into a Slack message."""
+def build_blocks(papers):
+    """Build Slack Block Kit blocks for the message."""
     today = datetime.now(timezone.utc).strftime("%A, %B %d %Y")
-    lines = [f"*📄 HF Daily Papers — {today}*\n"]
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"📄 HF Daily Papers — {today}"},
+        },
+        {"type": "divider"},
+    ]
 
     for i, p in enumerate(papers, 1):
-        lines.append(f"{i}. <{p['link']}|{p['title']}>")
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{i}. <{p['link']}|{p['title']}>*\n{p['description']}",
+                },
+            }
+        )
+        if i < len(papers):
+            blocks.append({"type": "divider"})
 
-    lines.append(f"\n_Source: <https://huggingface.co/papers|HF Daily Papers>_")
-    return "\n".join(lines)
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Source: <https://huggingface.co/papers|HF Daily Papers>",
+                }
+            ],
+        }
+    )
+
+    return blocks
 
 
-def send_slack_dm(text):
+def send_slack_dm(blocks, fallback_text):
     """Send a DM to the configured Slack user."""
     resp = requests.post(
         "https://slack.com/api/chat.postMessage",
         headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
         json={
             "channel": SLACK_USER_ID,
-            "text": text,
+            "text": fallback_text,
+            "blocks": blocks,
             "unfurl_links": False,
             "unfurl_media": False,
         },
@@ -77,8 +109,9 @@ def main():
         return
 
     print(f"Found {len(papers)} papers. Sending to Slack...")
-    msg = format_message(papers)
-    send_slack_dm(msg)
+    blocks = build_blocks(papers)
+    fallback = ", ".join(p["title"] for p in papers)
+    send_slack_dm(blocks, fallback)
 
 
 if __name__ == "__main__":
