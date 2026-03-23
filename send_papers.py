@@ -1,68 +1,78 @@
 import os
-import re
 import sys
-import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
-from urllib.request import urlopen
+import json
+from datetime import datetime
+from urllib.request import urlopen, Request
 
 import requests
 
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_USER_ID = os.environ["SLACK_USER_ID"]
-RSS_FEED_URL = "https://papers.takara.ai/api/feed"
+HF_API_URL = "https://huggingface.co/api/daily_papers"
 MAX_PAPERS = 3
 
 
 def fetch_papers():
-    """Fetch latest papers from HF Daily Papers RSS feed."""
-    with urlopen(RSS_FEED_URL) as resp:
-        xml_data = resp.read()
+    """Fetch top papers from HF Daily Papers API, sorted by upvotes."""
+    req = Request(HF_API_URL, headers={"Accept": "application/json"})
+    with urlopen(req) as resp:
+        data = json.loads(resp.read())
 
-    root = ET.fromstring(xml_data)
-    items = root.findall(".//item")
-
-    if not items:
-        print("No entries found in feed.")
+    if not data:
+        print("No papers found.")
         return []
 
+    # Sort by upvotes descending, take top N
+    data.sort(key=lambda x: x.get("paper", {}).get("upvotes", 0), reverse=True)
+
     papers = []
-    for item in items[:MAX_PAPERS]:
-        title = item.findtext("title", "Untitled")
-        link = item.findtext("link", "#")
-        description = item.findtext("description", "")
-        pub_date = item.findtext("pubDate", "")
-
-        # Extract arxiv ID from link (e.g. https://tldr.takara.ai/p/2603.17531)
-        arxiv_id = link.rstrip("/").split("/")[-1] if "/p/" in link else None
-        arxiv_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else None
-        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf" if arxiv_id else None
-
-        # Parse date
-        date_str = ""
-        if pub_date:
-            try:
-                dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z")
-                date_str = dt.strftime("%B %d, %Y")
-            except ValueError:
-                date_str = pub_date
-
-        if len(description) > 1000:
-            description = description[:997] + "..."
+    for entry in data[:MAX_PAPERS]:
+        p = entry.get("paper", {})
+        arxiv_id = p.get("id", "")
+        authors = [a["name"] for a in p.get("authors", []) if not a.get("hidden")]
 
         papers.append({
-            "title": title,
-            "link": link,
-            "description": description,
-            "date": date_str,
-            "arxiv_url": arxiv_url,
-            "pdf_url": pdf_url,
+            "title": entry.get("title", "Untitled"),
+            "summary": entry.get("summary", "No summary available."),
+            "authors": authors,
+            "upvotes": p.get("upvotes", 0),
+            "arxiv_id": arxiv_id,
+            "arxiv_url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else None,
+            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf" if arxiv_id else None,
+            "hf_url": f"https://huggingface.co/papers/{arxiv_id}" if arxiv_id else None,
+            "github_url": p.get("githubRepo"),
+            "thumbnail": entry.get("thumbnail"),
+            "published": entry.get("publishedAt", ""),
         })
 
     return papers
 
 
+def format_authors(authors, max_shown=3):
+    """Format author list, truncating if needed."""
+    if not authors:
+        return "Unknown"
+    if len(authors) <= max_shown:
+        return ", ".join(authors)
+    return ", ".join(authors[:max_shown]) + f" +{len(authors) - max_shown} more"
+
+
+def format_date(date_str):
+    """Parse ISO date to readable format."""
+    if not date_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.strftime("%B %d, %Y")
+    except ValueError:
+        return date_str
+
+
 def build_paper_blocks(paper, index):
-    """Build Slack Block Kit blocks for a single paper message."""
+    """Build Slack Block Kit blocks for a single paper."""
+    authors_str = format_authors(paper["authors"])
+    date_str = format_date(paper["published"])
+
     blocks = [
         {
             "type": "header",
@@ -72,60 +82,55 @@ def build_paper_blocks(paper, index):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*<{paper['link']}|{paper['title']}>*",
+                "text": f"*{paper['title']}*",
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"👤 {authors_str}"},
+                {"type": "mrkdwn", "text": f"📅 {date_str}"},
+                {"type": "mrkdwn", "text": f"👍 {paper['upvotes']} upvotes"},
+            ],
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": paper["summary"][:3000],
             },
         },
     ]
 
-    # Date
-    if paper["date"]:
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"📅 {paper['date']}"},
-            ],
+    # Link buttons
+    buttons = []
+    if paper["hf_url"]:
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "HF Paper"},
+            "url": paper["hf_url"],
+        })
+    if paper["arxiv_url"]:
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "arXiv"},
+            "url": paper["arxiv_url"],
+        })
+    if paper["pdf_url"]:
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "PDF"},
+            "url": paper["pdf_url"],
+        })
+    if paper["github_url"]:
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "GitHub"},
+            "url": paper["github_url"],
         })
 
-    # Abstract
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": paper["description"],
-        },
-    })
-
-    # Links
-    links = [f"<{paper['link']}|TLDR>"]
-    if paper["arxiv_url"]:
-        links.append(f"<{paper['arxiv_url']}|arXiv>")
-    if paper["pdf_url"]:
-        links.append(f"<{paper['pdf_url']}|PDF>")
-
-    blocks.append({
-        "type": "actions",
-        "elements": [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "TLDR"},
-                "url": paper["link"],
-            },
-            *(
-                [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "arXiv"},
-                    "url": paper["arxiv_url"],
-                }] if paper["arxiv_url"] else []
-            ),
-            *(
-                [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "PDF"},
-                    "url": paper["pdf_url"],
-                }] if paper["pdf_url"] else []
-            ),
-        ],
-    })
+    if buttons:
+        blocks.append({"type": "actions", "elements": buttons})
 
     return blocks
 
@@ -148,8 +153,6 @@ def send_slack_dm(blocks, fallback_text):
     if not data.get("ok"):
         print(f"ERROR: Slack API error: {data.get('error')}")
         sys.exit(1)
-
-    print(f"Message sent successfully to {SLACK_USER_ID}")
 
 
 def main():
