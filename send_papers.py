@@ -31,8 +31,8 @@ def fetch_papers():
         description = item.findtext("description", "")
         if len(title) > 120:
             title = title[:117] + "..."
-        if len(description) > 200:
-            description = description[:197] + "..."
+        if len(description) > 500:
+            description = description[:497] + "..."
         papers.append({"title": title, "link": link, "description": description})
 
     return papers
